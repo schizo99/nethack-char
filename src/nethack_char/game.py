@@ -5,6 +5,7 @@ import getpass
 import json
 import os
 import re
+import select
 import sys
 import time
 
@@ -12,6 +13,8 @@ import paramiko
 import pyte
 
 COLS, ROWS = 132, 40
+# Output is considered complete once the server has been quiet this long.
+QUIET = 0.15
 MENU_RE = re.compile(r"Logged in as:")
 STAT_NAMES = ("St", "Dx", "Co", "In", "Wi", "Ch")
 STATS_RE = re.compile(
@@ -33,22 +36,30 @@ class Session:
     def send(self, keys: str) -> None:
         self.channel.send(keys.encode())
 
-    def pump(self, seconds: float) -> None:
-        end = time.monotonic() + seconds
-        while time.monotonic() < end:
-            if self.channel.recv_ready():
-                self.stream.feed(self.channel.recv(65536))
-            elif self.channel.closed or self.channel.exit_status_ready():
-                raise ConnectionError("Server closed the connection")
-            else:
-                time.sleep(0.05)
+    def read(self, timeout: float) -> bool:
+        """Wait up to `timeout` for output; return True if any arrived."""
+        ready, _, _ = select.select([self.channel], [], [], max(timeout, 0))
+        if not ready:
+            return False
+        data = self.channel.recv(65536)
+        if not data:
+            raise ConnectionError("Server closed the connection")
+        self.stream.feed(data)
+        return True
+
+    def settle(self, timeout: float = 3) -> None:
+        """Read until the screen stops changing."""
+        end = time.monotonic() + timeout
+        while time.monotonic() < end and self.read(QUIET):
+            pass
 
     def wait_for(self, pattern: str | re.Pattern, timeout: float = 15) -> re.Match:
         end = time.monotonic() + timeout
         while not (match := re.search(pattern, self.text())):
-            if time.monotonic() > end:
+            remaining = end - time.monotonic()
+            if remaining <= 0:
                 raise TimeoutError(f"Timed out waiting for {pattern!r}. Screen:\n{self.text()}")
-            self.pump(0.05)
+            self.read(remaining)
         return match
 
 
@@ -72,7 +83,7 @@ def return_to_menu(session: Session, timeout: float = 60) -> None:
             raise TimeoutError(f"Did not return to the menu. Screen:\n{session.text()}")
         # 'q' on a [ynq] prompt skips the remaining "identify/show" questions.
         session.send("q" if "[ynq]" in session.text() else "\r")
-        session.pump(0.7)
+        session.settle()
 
 
 def save_game(session: Session) -> None:
@@ -84,10 +95,10 @@ def save_game(session: Session) -> None:
 
 def quit_game(session: Session) -> None:
     session.send("#")
-    session.pump(0.5)
+    session.settle()
     session.send("q")
     try:
-        session.wait_for(r"Really quit", timeout=2)
+        session.wait_for(r"Really quit", timeout=1)
     except TimeoutError:
         session.send("\r")
         session.wait_for(r"Really quit")
@@ -109,9 +120,10 @@ def roll(session: Session, minimums: dict[str, str | int], max_attempts: int) ->
         print(f"Attempt {attempt}: {' '.join(f'{k}:{v}' for k, v in stats.items())} -> {'OK' if ok else 'not OK'}")
 
         # Dismiss the intro text before issuing game commands.
+        session.settle()
         for _ in range(3):
             session.send("\x1b")
-            session.pump(0.5)
+            session.settle()
 
         if ok:
             save_game(session)
