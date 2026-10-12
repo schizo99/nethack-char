@@ -1,0 +1,13 @@
+{
+  "host": "192.168.201.223",
+  "port": 26,
+  "username": "root",
+  "key_filename": "~/.ssh/id_rsa",
+  "nethack_user": "schizo",
+  "max_attempts": 0,
+  "min_stats": {
+    "St": "18/01",
+    "Co": 16,
+    "Wi": 16
+  }
+}
